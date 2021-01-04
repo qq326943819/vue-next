@@ -1,5 +1,5 @@
 import { TrackOpTypes, TriggerOpTypes } from './operations'
-import { EMPTY_OBJ, isArray } from '@vue/shared'
+import { EMPTY_OBJ, isArray, isIntegerKey, isMap } from '@vue/shared'
 
 // The main WeakMap that stores {target -> key -> dep} connections.
 // Conceptually, it's easier to think of a dependency as a Dep class
@@ -10,22 +10,23 @@ type KeyToDepMap = Map<any, Dep>
 const targetMap = new WeakMap<any, KeyToDepMap>()
 
 export interface ReactiveEffect<T = any> {
-  (...args: any[]): T
+  (): T
   _isEffect: true
   id: number
   active: boolean
   raw: () => T
   deps: Array<Dep>
   options: ReactiveEffectOptions
+  allowRecurse: boolean
 }
 
 export interface ReactiveEffectOptions {
   lazy?: boolean
-  computed?: boolean
   scheduler?: (job: ReactiveEffect) => void
   onTrack?: (event: DebuggerEvent) => void
   onTrigger?: (event: DebuggerEvent) => void
   onStop?: () => void
+  allowRecurse?: boolean
 }
 
 export type DebuggerEvent = {
@@ -42,7 +43,7 @@ export interface DebuggerEventExtraInfo {
 }
 
 const effectStack: ReactiveEffect[] = []
-export let activeEffect: ReactiveEffect | undefined
+let activeEffect: ReactiveEffect | undefined
 
 export const ITERATE_KEY = Symbol(__DEV__ ? 'iterate' : '')
 export const MAP_KEY_ITERATE_KEY = Symbol(__DEV__ ? 'Map key iterate' : '')
@@ -78,12 +79,12 @@ export function stop(effect: ReactiveEffect) {
 let uid = 0
 
 function createReactiveEffect<T = any>(
-  fn: (...args: any[]) => T,
+  fn: () => T,
   options: ReactiveEffectOptions
 ): ReactiveEffect<T> {
-  const effect = function reactiveEffect(...args: unknown[]): unknown {
+  const effect = function reactiveEffect(): unknown {
     if (!effect.active) {
-      return options.scheduler ? undefined : fn(...args)
+      return options.scheduler ? undefined : fn()
     }
     if (!effectStack.includes(effect)) {
       cleanup(effect)
@@ -91,7 +92,7 @@ function createReactiveEffect<T = any>(
         enableTracking()
         effectStack.push(effect)
         activeEffect = effect
-        return fn(...args)
+        return fn()
       } finally {
         effectStack.pop()
         resetTracking()
@@ -100,6 +101,7 @@ function createReactiveEffect<T = any>(
     }
   } as ReactiveEffect
   effect.id = uid++
+  effect.allowRecurse = !!options.allowRecurse
   effect._isEffect = true
   effect.active = true
   effect.raw = fn
@@ -141,11 +143,11 @@ export function track(target: object, type: TrackOpTypes, key: unknown) {
     return
   }
   let depsMap = targetMap.get(target)
-  if (depsMap === void 0) {
+  if (!depsMap) {
     targetMap.set(target, (depsMap = new Map()))
   }
   let dep = depsMap.get(key)
-  if (dep === void 0) {
+  if (!dep) {
     depsMap.set(key, (dep = new Set()))
   }
   if (!dep.has(activeEffect)) {
@@ -171,26 +173,17 @@ export function trigger(
   oldTarget?: Map<unknown, unknown> | Set<unknown>
 ) {
   const depsMap = targetMap.get(target)
-  if (depsMap === void 0) {
+  if (!depsMap) {
     // never been tracked
     return
   }
 
   const effects = new Set<ReactiveEffect>()
-  const computedRunners = new Set<ReactiveEffect>()
   const add = (effectsToAdd: Set<ReactiveEffect> | undefined) => {
-    if (effectsToAdd !== void 0) {
+    if (effectsToAdd) {
       effectsToAdd.forEach(effect => {
-        if (effect !== activeEffect || !shouldTrack) {
-          if (effect.options.computed) {
-            computedRunners.add(effect)
-          } else {
-            effects.add(effect)
-          }
-        } else {
-          // the effect mutated its own dependency during its execution.
-          // this can be caused by operations like foo.value++
-          // do not trigger or we end in an infinite loop
+        if (effect !== activeEffect || effect.allowRecurse) {
+          effects.add(effect)
         }
       })
     }
@@ -211,18 +204,33 @@ export function trigger(
     if (key !== void 0) {
       add(depsMap.get(key))
     }
+
     // also run for iteration key on ADD | DELETE | Map.SET
-    const isAddOrDelete =
-      type === TriggerOpTypes.ADD ||
-      (type === TriggerOpTypes.DELETE && !isArray(target))
-    if (
-      isAddOrDelete ||
-      (type === TriggerOpTypes.SET && target instanceof Map)
-    ) {
-      add(depsMap.get(isArray(target) ? 'length' : ITERATE_KEY))
-    }
-    if (isAddOrDelete && target instanceof Map) {
-      add(depsMap.get(MAP_KEY_ITERATE_KEY))
+    switch (type) {
+      case TriggerOpTypes.ADD:
+        if (!isArray(target)) {
+          add(depsMap.get(ITERATE_KEY))
+          if (isMap(target)) {
+            add(depsMap.get(MAP_KEY_ITERATE_KEY))
+          }
+        } else if (isIntegerKey(key)) {
+          // new index added to array -> length changes
+          add(depsMap.get('length'))
+        }
+        break
+      case TriggerOpTypes.DELETE:
+        if (!isArray(target)) {
+          add(depsMap.get(ITERATE_KEY))
+          if (isMap(target)) {
+            add(depsMap.get(MAP_KEY_ITERATE_KEY))
+          }
+        }
+        break
+      case TriggerOpTypes.SET:
+        if (isMap(target)) {
+          add(depsMap.get(ITERATE_KEY))
+        }
+        break
     }
   }
 
@@ -238,15 +246,12 @@ export function trigger(
         oldTarget
       })
     }
-    if (effect.options.scheduler !== void 0) {
+    if (effect.options.scheduler) {
       effect.options.scheduler(effect)
     } else {
       effect()
     }
   }
 
-  // Important: computed effects must be run first so that computed getters
-  // can be invalidated before any normal effects that depend on them are run.
-  computedRunners.forEach(run)
   effects.forEach(run)
 }

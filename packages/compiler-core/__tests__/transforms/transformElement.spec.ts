@@ -70,6 +70,14 @@ describe('compiler: element transform', () => {
     expect(root.components).toContain(`Foo`)
   })
 
+  test('resolve implcitly self-referencing component', () => {
+    const { root } = parseWithElementTransform(`<Example/>`, {
+      filename: `/foo/bar/Example.vue?vue&type=template`
+    })
+    expect(root.helpers).toContain(RESOLVE_COMPONENT)
+    expect(root.components).toContain(`_self`)
+  })
+
   test('static props', () => {
     const { node } = parseWithElementTransform(`<div id="foo" class="bar" />`)
     expect(node).toMatchObject({
@@ -321,13 +329,13 @@ describe('compiler: element transform', () => {
               fallback: {
                 type: NodeTypes.JS_FUNCTION_EXPRESSION
               },
-              _: `[1]`
+              _: `[1 /* STABLE */]`
             })
           : createObjectMatcher({
               default: {
                 type: NodeTypes.JS_FUNCTION_EXPRESSION
               },
-              _: `[1]`
+              _: `[1 /* STABLE */]`
             })
       })
     }
@@ -381,7 +389,7 @@ describe('compiler: element transform', () => {
           default: {
             type: NodeTypes.JS_FUNCTION_EXPRESSION
           },
-          _: `[1]`
+          _: `[1 /* STABLE */]`
         })
       })
     }
@@ -780,6 +788,11 @@ describe('compiler: element transform', () => {
       expect(node.patchFlag).toBe(genFlagText(PatchFlags.NEED_PATCH))
     })
 
+    test('NEED_PATCH (vnode hooks)', () => {
+      const { node } = parseWithBind(`<div @vnodeUpdated="foo" />`)
+      expect(node.patchFlag).toBe(genFlagText(PatchFlags.NEED_PATCH))
+    })
+
     test('HYDRATE_EVENTS', () => {
       // ignore click events (has dedicated fast path)
       const { node } = parseWithElementTransform(`<div @click="foo" />`, {
@@ -809,6 +822,7 @@ describe('compiler: element transform', () => {
       const { node, root } = parseWithBind(`<component is="foo" />`)
       expect(root.helpers).toContain(RESOLVE_DYNAMIC_COMPONENT)
       expect(node).toMatchObject({
+        isBlock: true,
         tag: {
           callee: RESOLVE_DYNAMIC_COMPONENT,
           arguments: [
@@ -826,6 +840,7 @@ describe('compiler: element transform', () => {
       const { node, root } = parseWithBind(`<component :is="foo" />`)
       expect(root.helpers).toContain(RESOLVE_DYNAMIC_COMPONENT)
       expect(node).toMatchObject({
+        isBlock: true,
         tag: {
           callee: RESOLVE_DYNAMIC_COMPONENT,
           arguments: [
